@@ -1,0 +1,19 @@
+{
+  "name": "zkmarket-relayer",
+  "version": "0.0.1",
+  "description": "zkMarket Finance Relayer",
+  "main": "app.js",
+  "scripts": {
+    "start": "npx nodemon paypal/app.js"
+  },
+  "author": "geesimon",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.1",
+    "ethers": "^5.6.9",
+    "express": "^4.18.1"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.19"
+  }
+}
