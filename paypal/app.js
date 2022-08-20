@@ -17,7 +17,6 @@ const RelayerWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, EtherProvider);
 
 const toFixedHex = (number, length = 32) => '0x' + ethers.BigNumber.from(number).toHexString().slice(2).padStart(length * 2, '0');
 
-
 const app = express();
 const {PORT} = process.env;
 
@@ -27,6 +26,15 @@ const error = (_code, _msg) => {
 
     return err;
 }
+
+const paypalPayouts = (_payments) =>{
+    for (const account in _payments) {
+        console.log(account, _payments[account].toString());
+    }
+    // console.log(_payments);
+}
+
+let lastBlockNumber = 0;
 
 app.use(cors());
 app.use(express.json());
@@ -54,6 +62,7 @@ app.post('/api/registerCommitment', async (req, res, next) => {
 
             res.send(error(0, "OK"));
         } catch(e){
+            console.log(e);
             next(error(102, e))
         }
     } else {
@@ -111,12 +120,13 @@ app.post('/api/withdraw', async (req, res, next) => {
             const tx = await paypalUSDCAssetPool.withdraw(proofData, publicSignals);
             const {events} = await tx.wait();
             
-            if (events[0].event === 'Withdrawal') {
+            if (events[events.length - 1].event === 'Withdrawal') {
                 res.send(error(0, "OK"));
             } else {
                 next(error(303, "Bad Contract Response"))
             }
         } catch(e) {
+            console.log(e);
             next(error(302, e))
         }
     } else {
@@ -125,6 +135,41 @@ app.post('/api/withdraw', async (req, res, next) => {
 
     const t_end = new Date();
     console.log('Seconds Elapsed (withdraw):', (t_end - t_start) / 1000);
+})
+
+app.get('/payouts', async (req, res, next) => {
+    const currentBlockNumber = await EtherProvider.getBlockNumber();
+    const payments = {};
+
+    console.log('Current Block Number:', currentBlockNumber);
+    if (currentBlockNumber > lastBlockNumber) {        
+        const paypalUSDCAssetPool = new ethers.Contract(
+            PAYPAL_USDC_ASSET_POOL_ADDRESS, 
+            PaypalUSDCAssetPoolAbi, 
+            OperatorWallet
+        );
+        const filter = paypalUSDCAssetPool.filters.SellerPayouts();        
+        
+        const events = await paypalUSDCAssetPool.queryFilter(filter, lastBlockNumber, currentBlockNumber);
+        
+        events.forEach(event =>{
+            const account = event.args.paypalAccount;
+            const amount = ethers.BigNumber.from(events[0].args.amount.toString());
+
+            if (payments.hasOwnProperty(account)){
+                payments[account] = payments[account].add(amount);
+            } else {
+                payments[account] = amount;
+            }
+        })
+
+        paypalPayouts(payments);
+
+        lastBlockNumber = currentBlockNumber;
+        res.send({code:0, msg: events.length})
+    } else {
+        res.send({code:0, msg: 0})
+    }    
 })
 
 app.use(function(err, req, res, next){
