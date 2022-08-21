@@ -1,16 +1,22 @@
 const express = require('express')
 const cors = require('cors');
 const { ethers } = require("ethers");
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
 require('dotenv').config()
 
 const fs = require('fs');
 const PaypalUSDCAssetPoolAbi = JSON.parse(fs.readFileSync('paypal/PaypalUSDCAssetPool.json')).abi;
 
-const {
-      CHAIN_URL, 
-      OPERATOR_PRIVATE_KEY, 
-      RELAYER_PRIVATE_KEY,
-      PAYPAL_USDC_ASSET_POOL_ADDRESS} = process.env;
+const { CHAIN_URL, 
+        OPERATOR_PRIVATE_KEY, 
+        RELAYER_PRIVATE_KEY,
+        PAYPAL_USDC_ASSET_POOL_ADDRESS,
+        PORT, 
+        PAYPAL_AUTH_URL,
+        PAYPAL_PAYOUT_URL,
+        PAYPAL_CLIENT_ID,
+        PAYPAL_SECRET } = process.env;
 const EtherProvider = new ethers.providers.JsonRpcProvider(CHAIN_URL);
 const OperatorWallet = new ethers.Wallet(OPERATOR_PRIVATE_KEY, EtherProvider); 
 const RelayerWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, EtherProvider);
@@ -18,7 +24,6 @@ const RelayerWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, EtherProvider);
 const toFixedHex = (number, length = 32) => '0x' + ethers.BigNumber.from(number).toHexString().slice(2).padStart(length * 2, '0');
 
 const app = express();
-const {PORT} = process.env;
 
 const error = (_code, _msg) => {
     var err = new Error(_msg);
@@ -27,14 +32,11 @@ const error = (_code, _msg) => {
     return err;
 }
 
-const paypalPayouts = (_payments) =>{
-    for (const account in _payments) {
-        console.log(account, _payments[account].toString());
-    }
-    // console.log(_payments);
-}
-
-let lastBlockNumber = 0;
+let lastBlockNumber = 1978;
+let paypalAccessTokenCache = {
+    access_token: '',
+    expires: 0
+};
 
 app.use(cors());
 app.use(express.json());
@@ -57,8 +59,9 @@ app.post('/api/registerCommitment', async (req, res, next) => {
                                                         );
     
         try {
-            await paypalUSDCAssetPool.registerCommitment(toFixedHex(commitmentHash), amount.toString());
-
+            const tx = await paypalUSDCAssetPool.registerCommitment(toFixedHex(commitmentHash), amount.toString());
+            const receipt = await tx.wait();
+            console.log(receipt);
 
             res.send(error(0, "OK"));
         } catch(e){
@@ -137,12 +140,91 @@ app.post('/api/withdraw', async (req, res, next) => {
     console.log('Seconds Elapsed (withdraw):', (t_end - t_start) / 1000);
 })
 
+const getPaypalAccessToken = async () => {
+    const currentTime =  Math.round(Date.now() / 1000);
+    if (currentTime - paypalAccessTokenCache.expires > 1000) { //Consider expired
+        const clientIdAndSecret = PAYPAL_CLIENT_ID + ":" + PAYPAL_SECRET;
+        const base64Auth = Buffer.from(clientIdAndSecret).toString('base64');
+    
+        const resp = await fetch(PAYPAL_AUTH_URL, 
+                                    {
+                                        method: 'POST',
+                                        headers: {
+                                            'content-type': 'application/x-www-form-urlencoded',
+                                            'Accept': 'application/json',
+                                            'Accept-Language': 'en_US',
+                                            'Authorization': `Basic ${base64Auth}`,
+                                        },
+                                        body: 'grant_type=client_credentials'
+                                    })
+        const {access_token, expires_in} = await resp.json();
+        paypalAccessTokenCache.access_token = access_token;
+        paypalAccessTokenCache.expires =  Math.round(Date.now() / 1000) + expires_in;
+
+        console.log(paypalAccessTokenCache)
+    }
+    return paypalAccessTokenCache.access_token;
+}
+
+const paypalPayouts = async (_payments) =>{
+    const accessToken = await getPaypalAccessToken();
+    const bearer = 'Bearer ' + accessToken;
+    let payoutInstructions = {
+        'sender_batch_header': {
+            'sender_batch_id': `Payouts_${Date.now()}`,
+            'email_subject': 'You have a payout from zkMarket Finance!',
+            'email_message': 'Thanks for using zkMarket Finance!'
+        },
+        'items': []
+    }
+
+    for (const account in _payments) {
+        payoutInstructions.items.push({
+            'recipient_type': 'EMAIL',
+            'amount': {
+                'value': (Number(_payments[account].div(10 ** 4)) / 100).toString(),
+                'currency': 'USD'
+            },
+            'note': 'For selling coins!',
+            'receiver': account,
+            'notification_language': 'en-US'
+        })
+    }
+    console.log(JSON.stringify(payoutInstructions));
+
+    try {
+        const resp = await fetch(PAYPAL_PAYOUT_URL, 
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': bearer,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payoutInstructions)
+            });
+
+        const respJson = await resp.json();
+        console.log(respJson);
+    } catch (e) {
+        console.log(e);
+        return false;
+    }
+
+    return true;
+}
+
+app.get('/auth', async (req, res, next) => {
+    const accessToken = await getPaypalAccessToken();
+
+    res.send({code:0, accessToken});
+})
+
 app.get('/payouts', async (req, res, next) => {
     const currentBlockNumber = await EtherProvider.getBlockNumber();
     const payments = {};
 
     console.log('Current Block Number:', currentBlockNumber);
-    if (currentBlockNumber > lastBlockNumber) {        
+    if (currentBlockNumber > lastBlockNumber) {
         const paypalUSDCAssetPool = new ethers.Contract(
             PAYPAL_USDC_ASSET_POOL_ADDRESS, 
             PaypalUSDCAssetPoolAbi, 
@@ -151,25 +233,47 @@ app.get('/payouts', async (req, res, next) => {
         const filter = paypalUSDCAssetPool.filters.SellerPayouts();        
         
         const events = await paypalUSDCAssetPool.queryFilter(filter, lastBlockNumber, currentBlockNumber);
+        console.log(events);
+        if (events.length > 0) {
+            events.forEach(event =>{
+                console.log(event.args);
+                const account = event.args.paypalAccount;
+                const amount = ethers.BigNumber.from(events[0].args.amount.toString());
+    
+                if (payments.hasOwnProperty(account)){
+                    payments[account] = payments[account].add(amount);
+                } else {
+                    payments[account] = amount;
+                }
+            })
+    
+            if (await paypalPayouts(payments)){
+                lastBlockNumber = currentBlockNumber;
         
-        events.forEach(event =>{
-            const account = event.args.paypalAccount;
-            const amount = ethers.BigNumber.from(events[0].args.amount.toString());
-
-            if (payments.hasOwnProperty(account)){
-                payments[account] = payments[account].add(amount);
+                res.send({code:0, msg: 0});
             } else {
-                payments[account] = amount;
+                next(error(401, "Failed to request payout"));
             }
-        })
-
-        paypalPayouts(payments);
-
-        lastBlockNumber = currentBlockNumber;
-        res.send({code:0, msg: events.length})
+        }
     } else {
         res.send({code:0, msg: 0})
     }    
+})
+
+app.get('/test', async (req, res, next) => {
+    console.log(PAYPAL_USDC_ASSET_POOL_ADDRESS);
+    const paypalUSDCAssetPool = new ethers.Contract(
+        PAYPAL_USDC_ASSET_POOL_ADDRESS, 
+        PaypalUSDCAssetPoolAbi, 
+        OperatorWallet
+    );
+
+    const tx = await paypalUSDCAssetPool.registerCommitment(toFixedHex('1234'), '123');
+    const resp = await tx.wait();
+    console.log(resp);
+   
+    res.send({code:0, msg: 0});
+    
 })
 
 app.use(function(err, req, res, next){
