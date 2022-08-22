@@ -16,7 +16,8 @@ const { CHAIN_URL,
         PAYPAL_AUTH_URL,
         PAYPAL_PAYOUT_URL,
         PAYPAL_CLIENT_ID,
-        PAYPAL_SECRET } = process.env;
+        PAYPAL_SECRET,
+        INITIAL_BLOCK_NUMBER } = process.env;
 const EtherProvider = new ethers.providers.JsonRpcProvider(CHAIN_URL);
 const OperatorWallet = new ethers.Wallet(OPERATOR_PRIVATE_KEY, EtherProvider); 
 const RelayerWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, EtherProvider);
@@ -32,7 +33,7 @@ const error = (_code, _msg) => {
     return err;
 }
 
-let lastBlockNumber = 1978;
+let lastBlockNumber = Number(INITIAL_BLOCK_NUMBER);
 let paypalAccessTokenCache = {
     access_token: '',
     expires: 0
@@ -60,8 +61,9 @@ app.post('/api/registerCommitment', async (req, res, next) => {
     
         try {
             const tx = await paypalUSDCAssetPool.registerCommitment(toFixedHex(commitmentHash), amount.toString());
+            // await EtherProvider.waitForTransaction(tx.hash, 2, 30000);
             const receipt = await tx.wait();
-            console.log(receipt);
+            // console.log(receipt);
 
             res.send(error(0, "OK"));
         } catch(e){
@@ -91,6 +93,7 @@ app.post('/api/proveCommitment', async (req, res, next) => {
         try {
             const tx = await paypalUSDCAssetPool.proveCommitment(proofData, publicSignals);
             const {events} = await tx.wait();
+            // const {events} = await EtherProvider.waitForTransaction(tx.hash, 2, 30000);
             
             const resp = JSON.stringify({
                                         root: events[0].args.root,
@@ -121,6 +124,7 @@ app.post('/api/withdraw', async (req, res, next) => {
                                                         );
         try {
             const tx = await paypalUSDCAssetPool.withdraw(proofData, publicSignals);
+            // const {events} = await EtherProvider.waitForTransaction(tx.hash, 2, 30000);
             const {events} = await tx.wait();
             
             if (events[events.length - 1].event === 'Withdrawal') {
