@@ -126,12 +126,8 @@ app.post('/api/withdraw', async (req, res, next) => {
             const tx = await paypalUSDCAssetPool.withdraw(proofData, publicSignals);
             // const {events} = await EtherProvider.waitForTransaction(tx.hash, 2, 30000);
             const {events} = await tx.wait();
-            
-            if (events[events.length - 1].event === 'Withdrawal') {
-                res.send(error(0, "OK"));
-            } else {
-                next(error(303, "Bad Contract Response"))
-            }
+                        
+            res.send(error(0, "OK"));
         } catch(e) {
             console.log(e);
             next(error(302, e))
@@ -237,8 +233,8 @@ app.get('/payouts', async (req, res, next) => {
         const filter = paypalUSDCAssetPool.filters.SellerPayouts();        
         
         const events = await paypalUSDCAssetPool.queryFilter(filter, lastBlockNumber, currentBlockNumber);
-        console.log(events);
         if (events.length > 0) {
+            console.log(events.length);
             events.forEach(event =>{
                 console.log(event.args);
                 const account = event.args.paypalAccount;
@@ -252,16 +248,16 @@ app.get('/payouts', async (req, res, next) => {
             })
     
             if (await paypalPayouts(payments)){
-                lastBlockNumber = currentBlockNumber;
-        
-                res.send({code:0, msg: 0});
+                lastBlockNumber = currentBlockNumber;        
             } else {
                 next(error(401, "Failed to request payout"));
-            }
+                return;
+            }  
         }
+        res.send({code:0, msg: events.length});
     } else {
         res.send({code:0, msg: 0})
-    }    
+    }
 })
 
 app.get('/test', async (req, res, next) => {
